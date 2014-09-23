@@ -18,6 +18,7 @@ package com.complexible.stardog.ext.groovy
 import com.complexible.common.openrdf.model.Graphs
 import com.complexible.stardog.api.*
 import com.complexible.stardog.StardogException;
+import com.complexible.stardog.reasoning.api.ReasoningType
 
 import org.openrdf.model.Resource
 import org.openrdf.model.Value
@@ -55,6 +56,7 @@ class Stardog {
 	boolean noExpiration = false
 	boolean embedded = false
 	String home
+        ReasoningType reasoning
 
 	private ConnectionPool pool;
 
@@ -76,6 +78,7 @@ class Stardog {
 		maxPool = props.maxPool ?: 100
 		minPool = props.minPool ?: 100
 		noExpiration = props.noExpiration ?: false
+		reasoning = props.reasoning ?: ReasoningType.NONE
 
 		if (props.home) {
 			System.setProperty("stardog.home", props.home)
@@ -93,6 +96,7 @@ class Stardog {
 		}
 
 		connectionConfig = connectionConfig.credentials(username, password)
+		connectionConfig = connectionConfig.reasoning(reasoning)
 
 		poolConfig = ConnectionPoolConfig
 				.using(connectionConfig)
@@ -130,8 +134,12 @@ class Stardog {
 	 */
 	public void withConnection(Closure c) {
 		Connection con = getConnection()
-		c.call(con)
-		releaseConnection(con)
+		try {
+			c.call(con)
+		}
+		finally {
+			releaseConnection(con)
+		}
 	}
 
 	/**
