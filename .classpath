@@ -7,5 +7,9 @@
 	<classpathentry kind="con" path="org.springsource.ide.eclipse.gradle.dsld.classpathcontainer"/>
 	<classpathentry kind="con" path="GROOVY_DSL_SUPPORT"/>
 	<classpathentry kind="con" path="GROOVY_SUPPORT"/>
+	<classpathentry kind="lib" path="/home/conradL/svn/genomeinfo/production/stardog-lib-build/stardog-http-lib.jar"/>
+	<classpathentry kind="lib" path="/home/conradL/svn/genomeinfo/production/stardog-lib-build/stardog-lib.jar"/>
+	<classpathentry kind="lib" path="/home/conradL/.m2/repository/junit/junit/4.11/junit-4.11.jar"/>
+	<classpathentry kind="lib" path="/home/conradL/.m2/repository/org/hamcrest/hamcrest-core/1.3/hamcrest-core-1.3.jar"/>
 	<classpathentry kind="output" path="bin"/>
 </classpath>
