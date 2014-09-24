@@ -15,9 +15,11 @@
  */
 package com.complexible.stardog.ext.groovy
 
+import groovy.util.logging.Log
+
 import com.complexible.common.openrdf.model.Graphs
+import com.complexible.stardog.StardogException
 import com.complexible.stardog.api.*
-import com.complexible.stardog.StardogException;
 import com.complexible.stardog.reasoning.api.ReasoningType
 
 import org.openrdf.model.Resource
@@ -37,318 +39,310 @@ import org.openrdf.query.TupleQueryResult
  * 
  * @author Al Baker
  * @author Clark & Parsia, LLC
+ * @author Conrad Leonard
  *
  */
+
+@Log
 class Stardog {
 
+    String to
+    String server
+    String username
+    String password
+    int maxPool
+    int minPool
+    ReasoningType reasoning
 
-	// standard properties, similar to ConnectionConfiguration and Stardog-Spring DataSource
-	String url
-	String username
-	String password
-	boolean createIfNotPresent = false
-	String to
-	boolean failAtCapacity = false
-	boolean growAtCapacity = true
-	int maxIdle = 100
-	int maxPool = 100
-	int minPool = 10
-	boolean noExpiration = false
-	boolean embedded = false
-	String home
-        ReasoningType reasoning
+    private ConnectionPool pool
+    private ConnectionConfiguration connectionConfig
+    private ConnectionPoolConfig poolConfig
+    
+    public Stardog() { }
 
-	private ConnectionPool pool;
+    public Stardog(Map props) {
+        to        = props.to        ?: null
+        server    = props.server    ?: "snarl://localhost:5820"
+        username  = props.username  ?: null
+        password  = props.password  ?: null
+        maxPool   = props.maxPool   ?: 100
+        minPool   = props.minPool   ?: 10
+        reasoning = props.reasoning ?: ReasoningType.NONE
 
-	private ConnectionConfiguration connectionConfig;
+        if (props.home) {
+            System.setProperty("stardog.home", props.home)
+        }
+        
+        log.info "Initialized with $props"
 
-	private ConnectionPoolConfig poolConfig;
+        initialize()
+    }
 
+    /**
+     * Initialize private config members
+     */
+    void initialize() {
 
-	public Stardog() { }
+        connectionConfig = ConnectionConfiguration
+            .to(to)
+            .server(server)
+            .credentials(username, password)
+            .reasoning(reasoning)
 
-	public Stardog(Map props) {
-		url = props.url ?: null
-		username = props.username ?: null
-		password = props.password ?: null
-		to = props.to ?: null
-		failAtCapacity = props.failAtCapacity ?: false
-		growAtCapacity = props.growAtCapacity ?: true
-		maxIdle = props.maxIdle ?: 100
-		maxPool = props.maxPool ?: 100
-		minPool = props.minPool ?: 100
-		noExpiration = props.noExpiration ?: false
-		reasoning = props.reasoning ?: ReasoningType.NONE
+        poolConfig = ConnectionPoolConfig
+            .using(connectionConfig)
+            .minPool(minPool)
+            .maxPool(maxPool)
 
-		if (props.home) {
-			System.setProperty("stardog.home", props.home)
-		}
+        pool = poolConfig.create()
+    }
 
-		initialize()
-	}
+    /**
+     * Get a connection from the pool.
+     * 
+     * @return Connection
+     */
+    public Connection getConnection() {
+        try {
+            return pool.obtain()
+        } catch (StardogException e) {
+            log.severe "Error obtaining connection from Stardog pool"
+            log.severe e.toString()
+            throw new RuntimeException(e)
+        }
+    }
 
-	void initialize() {
+    /**
+     * Release the specified connection to the pool.
+     * 
+     * @param connection
+     */
+    public void releaseConnection(Connection connection) {
+        try {
+            pool.release(connection)
+        } catch (StardogException e) {
+            log.severe "Error releasing connection from Stardog pool"
+            log.severe e.toString()
+            throw new RuntimeException(e)
+        }
+    }
 
-		connectionConfig = ConnectionConfiguration.to(to)
+    /**
+     * <code>withConnection</code>
+     * Execute-around with guaranteed release of connection.
+     * 
+     * @param Closure to execute over the connection
+     */
+    public void withConnection(Closure c) {
+        Connection con = getConnection()
+        try {
+            // do stuff
+            c(con)
+        }
+        catch (e) {
+            // inform of problems
+            log.severe e.toString()
+        }
+        finally {
+            // clean up
+            releaseConnection(con)
+        }
+    }
 
-		if (url != null) {
-			connectionConfig = connectionConfig.server(url)
-		}
+    /**
+     * <code>query</code>
+     * @param queryString SPARQL query string
+     * @param closure to execute over the result set
+     */
+    public void query(String queryString, Closure c) {
+        query(queryString, null, c)
+    }
+    
+    /**
+     * <code>query</code>
+     * @param queryString SPARQL query string
+     * @param args map of string and object to pass bind as input parameters
+     * @param closure to execute over the result set
+     */
+    public void query(String queryString, Map args, Closure c) {
+        
+        log.info "queryString: $queryString"
+        println queryString
+        
+        withConnection { con -> 
+            
+            TupleQueryResult result = null
+            SelectQuery query = con.select(queryString)
+            
+            args?.each {
+                query.parameter(it.key, it.value)
+            }
+            
+            result = query.execute()
+            while (result.hasNext()) {
+                c(result.next())
+            }
 
-		connectionConfig = connectionConfig.credentials(username, password)
-		connectionConfig = connectionConfig.reasoning(reasoning)
+            result.close()
+        }
+    }
+    
+    /**
+     * <code>update</code>
+     * @param updateString SPARQL update string
+     */
+    public void update(String queryString) {
+        update(queryString, null)
+    }
+    
+    /**
+     * <code>update</code>
+     * @param updateString SPARQL update string
+     * @param args map of string and object to pass bind as input parameters
+     */
+    public void update(String queryString, Map args) {
+        
+        log.info "queryString: $queryString"
+        println queryString
+        
+        withConnection { con ->
 
-		poolConfig = ConnectionPoolConfig
-				.using(connectionConfig)
-				.minPool(minPool)
-				.maxPool(maxPool)
+            def query = con.update(queryString)
+            
+            args?.each {
+                query.parameter(it.key, it.value)
+            }
+            
+            query.execute()
+        }
+    }
+    
+    /**
+     * <code>each</code>
+     * iterates over a Binding result
+     * @param queryString
+     * @param closure with each SPARQL query bound into the closure
+     */
+    public void each(String queryString, Closure c) {
+        
+        log.info "queryString: $queryString"
+        println queryString 
+        
+        withConnection { con ->
 
-		pool = poolConfig.create();
-	}
+            TupleQueryResult result = null
+            SelectQuery query = con.select(queryString)
+            
+            result = query.execute()
+            
+            while (result.hasNext()) {
+                def input = result.next().iterator().collectEntries( {
+                    [ (it.getName()) : (it.getValue()) ]
+                })
+                // binds the Sesame result set as a map into the closure so SPARQL variables
+                // become closure native variables, e.g. "x"
+                c.delegate = input
+                c()
+            }
 
+            result.close()
+        }
+    }
 
-	public Connection getConnection() {
-		try {
-			if (pool == null)
-				afterPropertiesSet();
-			return pool.obtain();
-		} catch (StardogException e) {
-			log.error("Error obtaining connection from Stardog pool", e);
-			throw new RuntimeException(e);
-		}
-	}
+    /**
+     * <code>insert</code>
+     * Inserts either a single list, or a list of lists of triples
+     * assumes URIImpl(s,p)
+     * assumes LiteralImpl(o) unless a java.net.URI is passed in, in which case it will insert a URIImpl  
+     * @param arr lists
+     */
+    public void insert(List arr) {
+        
+        withConnection { con ->
+            
+            Adder adder = null
+            def statements = []
+            if (arr.size >= 1) {
+                if (arr[0].class == java.util.ArrayList.class) {
+                    arr.each { arr2 ->
+                        if (arr2.size == 3) {
+                            def s = arr2[0]
+                            def p = arr2[1]
+                            def o = arr2[2]
+                            if (o.class == java.net.URI.class) {
+                                statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), new URIImpl(o.toString())))
+                            }
+                            else if (o.class == java.lang.String.class) {
+                                statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), new LiteralImpl(o)))
+                            }
+                            else {
+                                statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), o))
+                            }
+                        }
+                    }
+                } else {
+                    def s = arr[0]
+                    def p = arr[1]
+                    def o = arr[2]
+                    if (o.class == java.net.URI.class) {
+                        statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), new URIImpl(o.toString())))
+                    }
+                    else if (o.class == java.lang.String.class) {
+                        statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), new LiteralImpl(o)))
+                    }
+                    else {
+                        statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), o))
+                    }
+                }
+            }
+            
+            con.begin()
+            con.add().graph(Graphs.newGraph(statements))
+            con.commit()
+        }
+    }
 
-	public void releaseConnection(Connection connection) {
-		try {
-			pool.release(connection);
-		} catch (StardogException e) {
-			log.error("Error releasing connection from Stardog pool", e);
-			throw new RuntimeException(e);
-		}
-	}
+    /**
+     * <code>remove</code>
+     * @param list of format subject, predicate, object, graph URI
+     */
+    public void remove(List args) {
 
+        def subject = args[0]
+        def predicate = args[1]
+        def object = args[2]
+        def graphUri = args[3]
 
-	/**
-	 * <code>withConnection</code>
-	 * @param Closure to execute over the connection
-	 */
-	public void withConnection(Closure c) {
-		Connection con = getConnection()
-		try {
-			c.call(con)
-		}
-		finally {
-			releaseConnection(con)
-		}
-	}
+        URIImpl subjectResource = null
+        URIImpl predicateResource = null
+        Resource context = null
 
-	/**
-	 * <code>query</code>
-	 * @param queryString SPARQL query string
-	 * @param closure to execute over the result set
-	 */
-	public void query(String queryString, Closure c) {
-		query(queryString, null, c)
-	}
-	
-	/**
-	 * <code>query</code>
-	 * @param queryString SPARQL query string
-	 * @param args map of string and object to pass bind as input parameters
-	 * @param closure to execute over the result set
-	 */
-	public void query(String queryString, Map args, Closure c) {
-		Connection con = getConnection()
-		TupleQueryResult result = null
-		try {
-			SelectQuery query = con.select(queryString)
-			
-			args?.each {
-				query.parameter(it.key, it.value)
-			}
-			
-			result = query.execute()
-			while (result.hasNext()) {
-				c.call(result.next())
-			}
+        if (subject != null) {
+            subjectResource = new URIImpl(subject)
+        }
+        if (predicate != null) {
+            predicateResource = new URIImpl(predicate)
+        }
 
-			result.close()
+        if (graphUri != null) {
+            context = ValueFactoryImpl.getInstance().createURI(graphUri)
+        }
 
-		} catch (Exception e) {
-			throw new RuntimeException(e)
-		} finally {
-			releaseConnection(con)
-		}
-	}
-	
-	/**
-	 * <code>update</code>
-	 * @param updateString SPARQL update string
-	 */
-	public void update(String queryString) {
-		update(queryString, null)
-	}
-	
-	/**
-	 * <code>update</code>
-	 * @param updateString SPARQL update string
-	 * @param args map of string and object to pass bind as input parameters
-	 */
-	public void update(String queryString, Map args) {
-		Connection con = getConnection()
-		try {
-			def query = con.update(queryString)
-			
-			args?.each {
-				query.parameter(it.key, it.value)
-			}
-			
-			query.execute()
-			
-		} catch (Exception e) {
-			throw new RuntimeException(e)
-		} finally {
-			releaseConnection(con)
-		}
-	}
-	
-	/**
-	 * <code>each</code>
-	 * iterates over a Binding result
-	 * @param queryString
-	 * @param closure with each SPARQL query bound into the closure
-	 */
-	public void each(String queryString, Closure c) {
-		Connection con = getConnection()
-		TupleQueryResult result = null
-		try {
-			SelectQuery query = con.select(queryString)
-			result = query.execute()
-			while (result.hasNext()) {
-				def input = result.next().iterator().collectEntries( {
-					[ (it.getName()) : (it.getValue()) ]
-				})
-				//println "Stardog.each(): input = ${input}"
-				// binds the Sesame result set as a map into the closure so SPARQL variables
-				// become closure native variables, e.g. "x"
-				c.delegate = input
-				c.call()
-			}
+        Value objectValue = null
+        if (object != null) {
+            if (object.class == java.net.URI.class) {
+                objectValue = new URIImpl(object.toString())
+            }
+            else {
+                objectValue = TypeConverter.asLiteral(object)
+            }
+        }
 
-			result.close()
-
-		} catch (Exception e) {
-			throw new RuntimeException(e)
-		} finally {
-			releaseConnection(con)
-		}
-	}
-
-	/**
-	 * <code>insert</code>
-	 * Inserts either a single list, or a list of lists of triples
-	 * assumes URIImpl(s,p)
-	 * assumes LiteralImpl(o) unless a java.net.URI is passed in, in which case it will insert a URIImpl  
-	 * @param arr lists
-	 */
-	public void insert(List arr) {
-		Connection con = getConnection()
-		Adder adder = null
-		try {
-			def statements = []
-			if (arr.size >= 1) {
-				if (arr[0].class == java.util.ArrayList.class) {
-					arr.each { arr2 ->
-						if (arr2.size == 3) {
-							def s = arr2[0]
-							def p = arr2[1]
-							def o = arr2[2]
-							if (o.class == java.net.URI.class) {
-								statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), new URIImpl(o.toString())))
-							}
-							else if (o.class == java.lang.String.class) {
-								statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), new LiteralImpl(o)))
-							}
-							else {
-								statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), o))
-							}
-						}
-					}
-				} else {
-					def s = arr[0]
-					def p = arr[1]
-					def o = arr[2]
-					if (o.class == java.net.URI.class) {
-						statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), new URIImpl(o.toString())))
-					}
-					else if (o.class == java.lang.String.class) {
-						statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), new LiteralImpl(o)))
-					}
-					else {
-						statements.add(new StatementImpl(new URIImpl(s), new URIImpl(p), o))
-					}
-				}
-			}
-			con.begin()
-			con.add().graph(Graphs.newGraph(statements))
-			con.commit()
-
-		} catch (Exception e) {
-			throw new RuntimeException(e)
-		} finally {
-			adder = null
-			releaseConnection(con)
-		}
-
-	}
-
-
-	/**
-	 * <code>remove</code>
-	 * @param list of format subject, predicate, object, graph URI
-	 */
-	public void remove(List args) {
-		Connection connection = getConnection()
-		def subject = args[0]
-		def predicate = args[1]
-		def object = args[2]
-		def graphUri = args[3]
-
-		URIImpl subjectResource = null
-		URIImpl predicateResource = null
-		Resource context = null
-
-		if (subject != null) {
-			subjectResource = new URIImpl(subject)
-		}
-		if (predicate != null) {
-			predicateResource = new URIImpl(predicate)
-		}
-
-		if (graphUri != null) {
-			context = ValueFactoryImpl.getInstance().createURI(graphUri)
-		}
-
-		Value objectValue = null
-		if (object != null) {
-			if (object.class == java.net.URI.class) {
-				objectValue = new URIImpl(object.toString())
-			}
-			else {
-				objectValue = TypeConverter.asLiteral(object)
-			}
-		}
-
-		try {
-			connection.begin()
-			connection.remove().statements(subjectResource, predicateResource, objectValue, context)
-			connection.commit()
-		} catch (Exception e) {
-			throw new RuntimeException(e)
-		} finally {
-			releaseConnection(connection)
-		}
-	}
-
+        withConnection { con ->
+            con.begin()
+            con.remove().statements(subjectResource, predicateResource, objectValue, context)
+            con.commit()
+        }
+    }
 
 }
