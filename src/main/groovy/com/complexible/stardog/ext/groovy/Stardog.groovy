@@ -73,6 +73,7 @@ class Stardog {
 			System.setProperty("stardog.home", props.home)
 		}
 		
+        props.password = '*****'
 		log.info "Initialized with $props"
 
 		initialize()
